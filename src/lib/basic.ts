@@ -1,10 +1,14 @@
 export type Subscriber<T> = (value: T) => void;
-export type Unsubscriber = () => void;
-export type UnsubscriberWeak = Unsubscriber | { unsubscribe: Unsubscriber };
-export type UnsubscriberStrong = Unsubscriber & { unsubscribe: Unsubscriber };
+export type UnsubscriberWeak = (() => void) | { unsubscribe(): void };
+export type UnsubscriberStrong = { (): boolean, unsubscribe(): boolean };
 export type Updater<T> = (value: T) => T;
 export type Invalidator = () => void;
-export type StartStopNotifier<T> = (set: Subscriber<T>) => Unsubscriber | void;
+export type StartStopNotifier<T> = (set: Subscriber<T>) => (() => void) | void;
+
+export interface SubscriberInvalidatorPair<T> {
+    run: Subscriber<T>;
+    invalidate?: Invalidator;
+}
 
 /**
  * A minimal implementation of the Store Contract.
@@ -60,9 +64,20 @@ export interface Readable<T> extends IReadable<T> {
      * Get the current value of this store but do not subscribe to changes.
      */
     get(this: void): T;
+
+    /**
+     * If true, the store is in the middle of being updated – ie. after being set or invalidated
+     * but before changing its value and notifying any of its subscribers.
+     */
+    isDirty(this: void): boolean;
+
+    /**
+     * Get the current value even if the store is dirty.
+     */
+    getUnchecked(this: void): T;
 }
 
-export interface Writable<T> extends IWritable<T> {
+export interface Writable<T> extends Readable<T>, Omit<IWritable<T>, 'subscribe'> {
     /**
      * Set the value of this store and notify subscribers.
      * @returns the new value
@@ -80,6 +95,77 @@ export interface Writable<T> extends IWritable<T> {
 export function writable<T>(value: T, start?: StartStopNotifier<T>): Writable<T>;
 export function writable<T>(value?: T, start?: StartStopNotifier<T | undefined>): Writable<T | undefined>;
 export function writable<T>(value: T, start?: StartStopNotifier<T>): Writable<T> {
-    
+    let subscribers: SubscriberInvalidatorPair<T>[] = [];
+    let stop: (() => void) | void;
+    let dirty = false;
+
+    function listen(run: Subscriber<T>, invalidate?: Invalidator): UnsubscriberStrong {
+        // first subscriber?
+        if (subscribers.length === 0) {
+            stop = start?.(set);
+        }
+
+        const obj = { run, invalidate };
+        subscribers.push(obj);
+
+        function unsubscribe(): boolean {
+            const index = subscribers.indexOf(obj);
+            if (index === -1) return false;
+            subscribers.splice(index, 1);
+
+            // last subscriber?
+            if (subscribers.length === 0) stop?.();
+
+            return true;
+        }
+
+        return Object.assign(unsubscribe, { unsubscribe });
+    }
+
+    function subscribe(run: Subscriber<T>, invalidate?: Invalidator): UnsubscriberStrong {
+        run(value);
+        return listen(run, invalidate);
+    }
+
+    function set(val: T): T {
+        dirty = true;
+        for (const { invalidate } of subscribers) {
+            invalidate?.();
+        }
+        value = val;
+        dirty = false;
+        for (const { run } of subscribers) {
+            run(value);
+        }
+        return value;
+    }
+
+    function update(updater: Updater<T>): T {
+        return set(updater(value));
+    }
+
+    function get(): T {
+        if (dirty) {
+            console.log("Accessing a dirty store is not recommended. Use getUnchecked if this was intentional.");
+        }
+        return value;
+    }
+
+    function isDirty(): boolean {
+        return dirty;
+    }
+
+    function getUnchecked(): T {
+        return value;
+    }
+
+    return { listen, subscribe, get, set, update, isDirty, getUnchecked };
 }
 
+
+export function readable<T>(value: T, start?: StartStopNotifier<T>): Readable<T>;
+export function readable<T>(value?: T, start?: StartStopNotifier<T | undefined>): Readable<T | undefined>;
+export function readable<T>(value: T, start?: StartStopNotifier<T>): Readable<T> {
+    const { listen, subscribe, get, isDirty, getUnchecked } = writable(value, start);
+    return { listen, subscribe, get, isDirty, getUnchecked };
+}
