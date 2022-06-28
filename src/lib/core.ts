@@ -3,7 +3,8 @@ export type UnsubscriberWeak = (() => void) | { unsubscribe(): void };
 export type UnsubscriberStrong = { (): boolean, unsubscribe(): boolean };
 export type Updater<T> = (value: T) => T;
 export type Invalidator = () => void;
-export type StartStopNotifier<T> = (set: Subscriber<T>) => (() => void) | void;
+export type Stopper = () => void;
+export type StartStopNotifier<T> = (set: Subscriber<T>) => Stopper | void;
 
 export interface SubscriberInvalidatorPair<T> {
     run: Subscriber<T>;
@@ -70,11 +71,6 @@ export interface Readable<T> extends IReadable<T> {
      * but before changing its value and notifying any of its subscribers.
      */
     isDirty(this: void): boolean;
-
-    /**
-     * Get the current value even if the store is dirty.
-     */
-    getUnchecked(this: void): T;
 }
 
 export interface Writable<T> extends Readable<T>, Omit<IWritable<T>, 'subscribe'> {
@@ -95,8 +91,8 @@ export interface Writable<T> extends Readable<T>, Omit<IWritable<T>, 'subscribe'
 export function writable<T>(value: T, start?: StartStopNotifier<T>): Writable<T>;
 export function writable<T>(value?: T, start?: StartStopNotifier<T | undefined>): Writable<T | undefined>;
 export function writable<T>(value: T, start?: StartStopNotifier<T>): Writable<T> {
-    let subscribers: SubscriberInvalidatorPair<T>[] = [];
-    let stop: (() => void) | void;
+    const subscribers: SubscriberInvalidatorPair<T>[] = [];
+    let stop: Stopper | void;
     let dirty = false;
 
     function listen(run: Subscriber<T>, invalidate?: Invalidator): UnsubscriberStrong {
@@ -145,9 +141,6 @@ export function writable<T>(value: T, start?: StartStopNotifier<T>): Writable<T>
     }
 
     function get(): T {
-        if (dirty) {
-            console.log("Accessing a dirty store is not recommended. Use getUnchecked if this was intentional.");
-        }
         return value;
     }
 
@@ -155,17 +148,40 @@ export function writable<T>(value: T, start?: StartStopNotifier<T>): Writable<T>
         return dirty;
     }
 
-    function getUnchecked(): T {
-        return value;
-    }
-
-    return { listen, subscribe, get, set, update, isDirty, getUnchecked };
+    return { listen, subscribe, get, set, update, isDirty };
 }
 
 
 export function readable<T>(value: T, start?: StartStopNotifier<T>): Readable<T>;
 export function readable<T>(value?: T, start?: StartStopNotifier<T | undefined>): Readable<T | undefined>;
 export function readable<T>(value: T, start?: StartStopNotifier<T>): Readable<T> {
-    const { listen, subscribe, get, isDirty, getUnchecked } = writable(value, start);
-    return { listen, subscribe, get, isDirty, getUnchecked };
+    const { listen, subscribe, get, isDirty } = writable(value, start);
+    return { listen, subscribe, get, isDirty };
+}
+
+/**
+ * Get the value of a store – either by retrieving it directly, if the store
+ * supports this, or by subscribing and immediately unsubscribing again.
+ */
+export function get<T>(store: IReadable<T>): T {
+    const s: IReadable<T> & Partial<Pick<Readable<T>, 'get'>> = store;
+    if (typeof s.get === 'function' && s.get.length === 0) {
+        return s.get();
+    }
+
+    let value: T;
+    let called = false;
+    const unsub = store.subscribe(v => {
+        value = v;
+        called = true;
+    });
+    
+    if (typeof unsub === 'function') unsub();
+    else unsub.unsubscribe();
+
+    if (!called) throw new TypeError(
+        "Subscribed function not called synchronously at subscription time."
+    );
+
+    return value!;
 }
