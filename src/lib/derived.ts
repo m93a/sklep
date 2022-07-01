@@ -1,14 +1,17 @@
-import type {
-	Invalidator,
-	IReadable,
-	Readable,
-	Stopper,
-	Subscriber,
-	SubscriberInvalidatorPair,
-	UnsubscriberStrong,
-	Updater
+import {
+	writable,
+	type Invalidator,
+	type IReadable,
+	type Readable,
+	type Stopper,
+	type Subscriber,
+	type SubscriberInvalidatorPair,
+	type UnsubscriberStrong,
+	type UnsubscriberWeak,
+	type Updater,
+	type WritableOptions
 } from './core';
-import { writable } from './core';
+import { shouldSomeUpdate } from './utils';
 
 type ReadableStores =
 	| IReadable<any>
@@ -23,7 +26,7 @@ type PartialStoreValues<T> = T extends Readable<infer U>
 	? U | undefined
 	: { [K in keyof T]: T[K] extends Readable<infer U> ? U | undefined : never };
 
-export interface DerivedOptions<S extends ReadableStores, T> {
+export interface DerivedOptions<S extends ReadableStores, T> extends WritableOptions {
 	/** A store or a list of stores used to compute this derived store's value. */
 	deps: S;
 
@@ -45,12 +48,12 @@ export interface DerivedOptions<S extends ReadableStores, T> {
 	update: (
 		deps: StoreValues<S>,
 		set: Updater<T>,
-		previousDeps: PartialStoreValues<S>,
-		previousValue: T | undefined
+		previousValue: T | undefined,
+		previousDeps: PartialStoreValues<S>
 	) => Stopper | void;
 
 	/**
-	 * provide an initial value, so that `update` doesn't recieve
+	 * Provide an initial value, so that `update` doesn't recieve
 	 * `undefined` as the first `previousValue`
 	 */
 	initial?: T;
@@ -59,18 +62,24 @@ export interface DerivedOptions<S extends ReadableStores, T> {
 	 * By default
 	 */
 	skipDirtyDeps?: boolean;
-	keepAlive?: boolean;
+
+	/**
+	 * Similar to `skipSubscribersWhenEqual`, but this time it skips
+	 * the call to the `update` function if the value of dependencies
+	 * is reference-equal to the old value. Default value: `'never'`
+	 */
+	skipUpdateWhenEqual?: 'never' | 'primitive' | 'always';
 }
 
 export type SimpleUpdateCallback<S, T, P> = (
 	deps: StoreValues<S>,
-	previousDeps: PartialStoreValues<S>,
-	previousValue: P
+	previousValue: P,
+	previousDeps: PartialStoreValues<S>
 ) => T;
 
 /**
- * Derived value store by synchronizing one or more readable stores and
- * applying an aggregation function over its input values.
+ * Store which listens to the change of other stores' values and
+ * computes its own value based on these.
  *
  * @param stores - input stores
  * @param fn - function callback that computes the new value
@@ -81,8 +90,8 @@ export function derived<S extends ReadableStores, T>(
 ): Readable<T>;
 
 /**
- * Derived value store by synchronizing one or more readable stores and
- * applying an aggregation function over its input values.
+ * Store which listens to the change of other stores' values and
+ * computes its own value based on these.
  *
  * @param stores - input stores
  * @param initialValue - provide an initial value, so that `fn` doesn't recieve
@@ -96,8 +105,8 @@ export function derived<S extends ReadableStores, T>(
 ): Readable<T>;
 
 /**
- * Derived value store by synchronizing one or more readable stores and
- * applying an aggregation function over its input values.
+ * Store which listens to the change of other stores' values and
+ * computes its own value based on these.
  *
  * @param options - various settings and options for the derived store
  */
@@ -115,8 +124,8 @@ export function derived<S extends ReadableStores, T>(
 		options = {
 			deps: <S>a,
 			initial: <T>b,
-			update(stores, set, pDeps, pVal) {
-				set(c(stores, pDeps, pVal!));
+			update(stores, set, pVal, pDeps) {
+				set(c(stores, pVal!, pDeps));
 			}
 		};
 	} else {
@@ -128,62 +137,58 @@ export function derived<S extends ReadableStores, T>(
 		};
 	}
 
-	const { update, initial } = options;
+	const { update, initial, skipSubscribersWhenEqual } = options;
 	const skipDirtyDeps = options.skipDirtyDeps ?? true;
-	const deps: IReadable<any>[] = Array.isArray(options.deps) ? options.deps : [options.deps];
+	const skipUpdateWhenEqual = options.skipUpdateWhenEqual ?? 'never';
 
-	const subscribers: SubscriberInvalidatorPair<T>[] = [];
-	let stop: Stopper | void;
-	let dirty = false;
+    const single = !Array.isArray(options.deps);
+	const deps: ReadonlyArray<
+		IReadable<any> & { subscribe(run: Subscriber<any>, invalidate?: Invalidator): UnsubscriberWeak }
+	> = Array.isArray(options.deps) ? options.deps : [options.deps];
+	const depValues: any[] = [];
+	let depPrevValues: any[] = deps.map((_) => undefined);
+	const depDirty = deps.map((_) => true);
+	const depUnsubscribers: UnsubscriberWeak[] = [];
 
-	function listen(run: Subscriber<T>, invalidate?: Invalidator): UnsubscriberStrong {
-		// first subscriber?
-		if (subscribers.length === 0) {
-			stop = start?.(set);
-		}
+	const { listen, subscribe, get, isDirty, set, invalidate } = writable<T>(
+		initial!,
+		() => {
+			for (let i = 0; i < deps.length; i++) {
+				depDirty[i] = true;
+				depUnsubscribers[i] = deps[i].subscribe(
+					(value) => {
+						depValues[i] = value;
+						depDirty[i] = false;
 
-		const obj = { run, invalidate };
-		subscribers.push(obj);
+						if (skipDirtyDeps && depDirty.some((d) => d)) return;
+                        if (!shouldSomeUpdate(depPrevValues, depValues, skipUpdateWhenEqual)) return;
 
-		function unsubscribe(): boolean {
-			const index = subscribers.indexOf(obj);
-			if (index === -1) return false;
-			subscribers.splice(index, 1);
+						update(
+                            single ? depValues[0] : depValues,
+                            set,
+                            get(),
+                            single ? depPrevValues[0] : depPrevValues
+                        );
 
-			// last subscriber?
-			if (subscribers.length === 0) stop?.();
+                        depPrevValues = [...depValues];
+					},
+					() => {
+						depDirty[i] = true;
+						invalidate();
+					}
+				);
+			}
 
-			return true;
-		}
-
-		return Object.assign(unsubscribe, { unsubscribe });
-	}
-
-	function subscribe(run: Subscriber<T>, invalidate?: Invalidator): UnsubscriberStrong {
-		run(value);
-		return listen(run, invalidate);
-	}
-
-	function set(val: T): T {
-		dirty = true;
-		for (const { invalidate } of subscribers) {
-			invalidate?.();
-		}
-		value = val;
-		dirty = false;
-		for (const { run } of subscribers) {
-			run(value);
-		}
-		return value;
-	}
-
-	function get(): T {
-		return value;
-	}
-
-	function isDirty(): boolean {
-		return dirty;
-	}
+			return () => {
+				for (let i = 0; i < deps.length; i++) {
+					const unsub = depUnsubscribers[i];
+					if (typeof unsub === 'function') unsub();
+					else unsub.unsubscribe();
+				}
+			};
+		},
+		{ skipSubscribersWhenEqual }
+	);
 
 	return { listen, subscribe, get, isDirty };
 }
