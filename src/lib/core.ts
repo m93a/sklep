@@ -1,12 +1,13 @@
 import { shouldUpdate } from './utils';
 
-export type Subscriber<T> = (value: T) => void;
+export type Setter<T> = (value: T) => void;
+export type Subscriber<T> = (value: T, previousValue: T) => void;
 export type UnsubscriberWeak = (() => void) | { unsubscribe(): void };
 export type UnsubscriberStrong = { (): boolean; unsubscribe(): boolean };
 export type Updater<T> = (value: T) => T;
 export type Invalidator = () => void;
 export type Stopper = () => void;
-export type StartStopNotifier<T> = (set: Subscriber<T>) => Stopper | void;
+export type StartStopNotifier<T> = (set: Setter<T>) => Stopper | void;
 
 export interface SubscriberInvalidatorPair<T> {
 	run: Subscriber<T>;
@@ -96,20 +97,23 @@ export interface Writable<T> extends Readable<T>, Omit<IWritable<T>, 'subscribe'
 
 export interface WritableOptions {
 	/**
-     * Sometimes it makes sense to call your subscribers even if the new value
-     * is reference-equal to the old one, typical example being
-     * `$arr.push(1); $arr = $arr`. This setting lets you modify this behavior
-     * to your liking. Possible values:
-     *  * `'never'` – subscribers are never skipped, they are called after each `set`
-     *  * `'primitive'` – subscribers are skipped if the new value is _a primitive_
-     *          which is equal to the old value; `null` counts as a primitive, too
-     *  * `always` – if the new value is equal to the old one, subscribers are always skipped
-     * 
-     * Default value: `'primitive'`
-     */
+	 * Sometimes it makes sense to call your subscribers even if the new value
+	 * is reference-equal to the old one, typical example being
+	 * `$arr.push(1); $arr = $arr`. This setting lets you modify this behavior
+	 * to your liking. Possible values:
+	 *  * `'never'` – subscribers are never skipped, they are called after each `set`
+	 *  * `'primitive'` – subscribers are skipped if the new value is _a primitive_
+	 *          which is equal to the old value; `null` counts as a primitive, too
+	 *  * `always` – if the new value is equal to the old one, subscribers are always skipped
+	 *
+	 * Default value: `'primitive'`
+	 *
+	 * **NOTE**: If you're calling `set` on a store which is dirty (ie. has been invalidated),
+	 * subscribers will always be called to let them know the store is not dirty anymore.
+	 */
 	skipSubscribersWhenEqual?: 'never' | 'primitive' | 'always';
 
-    // TODO keepAlive
+	// TODO keepAlive
 }
 
 export function writable<T>(
@@ -159,7 +163,7 @@ export function writable<T>(
 	}
 
 	function subscribe(run: Subscriber<T>, invalidate?: Invalidator): UnsubscriberStrong {
-		run(value);
+		run(value, value);
 		return listen(run, invalidate);
 	}
 
@@ -168,20 +172,21 @@ export function writable<T>(
 
 		dirty = true;
 		for (const { invalidate } of subscribers) {
-			// todo handle errors
+			// TODO handle errors
 			invalidate?.();
 		}
 	}
 
 	function set(val: T): T {
-		if (!shouldUpdate(value, val, skipSubscribersWhenEqual)) return value;
+		if (!dirty && !shouldUpdate(value, val, skipSubscribersWhenEqual)) return value;
 
 		invalidate();
+		const prevValue = value;
 		value = val;
 		dirty = false;
 		for (const { run } of subscribers) {
-			// todo handle errors
-			run(value);
+			// TODO handle errors
+			run(value, prevValue);
 		}
 		return value;
 	}
@@ -213,12 +218,22 @@ export function readable<T>(
 	options?: WritableOptions
 ): Readable<T | undefined>;
 
+export function readable<T>(writable: Writable<T>): Readable<T>;
+
 export function readable<T>(
-	value: T,
+	value: T | Writable<T>,
 	start?: StartStopNotifier<T>,
 	options?: WritableOptions
 ): Readable<T> {
-	const { listen, subscribe, get, isDirty } = writable(value, start, options);
+	const isStore =
+		(typeof value === 'object' || typeof value === 'function') &&
+		'subscribe' in value &&
+		typeof value.subscribe === 'function' &&
+		typeof value.listen === 'function' &&
+		typeof value.get === 'function' &&
+		typeof value.isDirty === 'function';
+
+	const { listen, subscribe, get, isDirty } = isStore ? value : writable(<T>value, start, options);
 	return { listen, subscribe, get, isDirty };
 }
 

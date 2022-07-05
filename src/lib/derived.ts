@@ -137,7 +137,7 @@ export function derived<S extends ReadableStores, T>(
 		};
 	}
 
-	const { update, initial, skipSubscribersWhenEqual } = options;
+	const { update, initial, skipSubscribersWhenEqual } = options; // TODO keepAlive
 	const skipDirtyDeps = options.skipDirtyDeps ?? true;
 	const skipUpdateWhenEqual = options.skipUpdateWhenEqual ?? 'never';
 
