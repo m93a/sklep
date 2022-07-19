@@ -7,7 +7,7 @@ export type UnsubscriberStrong = { (): boolean; unsubscribe(): boolean };
 export type Updater<T> = (value: T) => T;
 export type Invalidator = () => void;
 export type Stopper = () => void;
-export type StartStopNotifier<T> = (set: Setter<T>) => Stopper | void;
+export type StartStopNotifier<T> = (set: Setter<T>, invalidate: Invalidator) => Stopper | void;
 
 export interface SubscriberInvalidatorPair<T> {
 	run: Subscriber<T>;
@@ -139,13 +139,13 @@ export function writable<T>(
 
 	const skipSubscribersWhenEqual = options?.skipSubscribersWhenEqual ?? 'primitive';
 
-	function listen(run: Subscriber<T>, invalidate?: Invalidator): UnsubscriberStrong {
+	function listen(run: Subscriber<T>, inv?: Invalidator): UnsubscriberStrong {
 		// first subscriber?
 		if (subscribers.length === 0) {
-			stop = start?.(set);
+			stop = start?.(set, invalidate);
 		}
 
-		const obj = { run, invalidate };
+		const obj = { run, invalidate: inv };
 		subscribers.push(obj);
 
 		function unsubscribe(): boolean {
@@ -163,8 +163,11 @@ export function writable<T>(
 	}
 
 	function subscribe(run: Subscriber<T>, invalidate?: Invalidator): UnsubscriberStrong {
+		// first run the start function – if it were to set the value,
+		// we don't want to run any subscriber before that
+		const u = listen(run, invalidate);
 		run(value, value);
-		return listen(run, invalidate);
+		return u;
 	}
 
 	function invalidate(): void {
@@ -212,12 +215,6 @@ export function readable<T>(
 	options?: WritableOptions
 ): Readable<T>;
 
-export function readable<T>(
-	value?: T,
-	start?: StartStopNotifier<T | undefined>,
-	options?: WritableOptions
-): Readable<T | undefined>;
-
 export function readable<T>(writable: Writable<T>): Readable<T>;
 
 export function readable<T>(
@@ -258,7 +255,11 @@ export function get<T>(store: IReadable<T>): T {
 	else unsub.unsubscribe();
 
 	if (!called)
-		throw new TypeError('Subscribed function not called synchronously at subscription time.');
+		throw new TypeError(
+			"Subscribed function not called synchronously at subscription time. " +
+			"If you're trying to get the value of an RxJS observable, you have " +
+			"to wrap it using `const r = readable(o)` and then get the value of `r`."
+		);
 
 	return value!;
 }

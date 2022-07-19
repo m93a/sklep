@@ -49,7 +49,7 @@ export interface DerivedOptions<S extends ReadableStores, T> extends WritableOpt
 		deps: StoreValues<S>,
 		set: Updater<T>,
 		previousValue: T | undefined,
-		previousDeps: PartialStoreValues<S>
+		previousDeps: StoreValues<S>
 	) => Stopper | void;
 
 	/**
@@ -74,7 +74,7 @@ export interface DerivedOptions<S extends ReadableStores, T> extends WritableOpt
 export type SimpleUpdateCallback<S, T, P> = (
 	deps: StoreValues<S>,
 	previousValue: P,
-	previousDeps: PartialStoreValues<S>
+	previousDeps: StoreValues<S>
 ) => T;
 
 /**
@@ -131,8 +131,8 @@ export function derived<S extends ReadableStores, T>(
 	} else {
 		options = {
 			deps: <S>a,
-			update(stores, set, prev) {
-				set((<any>b)(stores, prev));
+			update(stores, set, pVal, pDeps) {
+				set((<any>b)(stores, pVal, pDeps));
 			}
 		};
 	}
@@ -141,7 +141,7 @@ export function derived<S extends ReadableStores, T>(
 	const skipDirtyDeps = options.skipDirtyDeps ?? true;
 	const skipUpdateWhenEqual = options.skipUpdateWhenEqual ?? 'never';
 
-    const single = !Array.isArray(options.deps);
+	const single = !Array.isArray(options.deps);
 	const deps: ReadonlyArray<
 		IReadable<any> & { subscribe(run: Subscriber<any>, invalidate?: Invalidator): UnsubscriberWeak }
 	> = Array.isArray(options.deps) ? options.deps : [options.deps];
@@ -153,24 +153,29 @@ export function derived<S extends ReadableStores, T>(
 	const { listen, subscribe, get, isDirty, set, invalidate } = writable<T>(
 		initial!,
 		() => {
+			let starting = true;
 			for (let i = 0; i < deps.length; i++) {
 				depDirty[i] = true;
 				depUnsubscribers[i] = deps[i].subscribe(
 					(value) => {
 						depValues[i] = value;
+						if (starting) depPrevValues[i] = value;
 						depDirty[i] = false;
 
 						if (skipDirtyDeps && depDirty.some((d) => d)) return;
-                        if (!shouldSomeUpdate(depPrevValues, depValues, skipUpdateWhenEqual)) return;
+						if (!isDirty() && !shouldSomeUpdate(depPrevValues, depValues, skipUpdateWhenEqual))
+							return;
+
+						debugger;
 
 						update(
-                            single ? depValues[0] : depValues,
-                            set,
-                            get(),
-                            single ? depPrevValues[0] : depPrevValues
-                        );
+							single ? depValues[0] : depValues,
+							set,
+							get(),
+							single ? depPrevValues[0] : depPrevValues
+						);
 
-                        depPrevValues = [...depValues];
+						depPrevValues = [...depValues];
 					},
 					() => {
 						depDirty[i] = true;
@@ -178,6 +183,8 @@ export function derived<S extends ReadableStores, T>(
 					}
 				);
 			}
+
+			starting = false;
 
 			return () => {
 				for (let i = 0; i < deps.length; i++) {
