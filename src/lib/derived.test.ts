@@ -1,4 +1,4 @@
-import { writable } from "./core";
+import { writable, type IReadable, type IWritable } from "./core";
 import { derived } from "./derived";
 
 test("single store, simple update, without initial value", () => {
@@ -77,5 +77,56 @@ test("multiple stores, simple update, without initial value", () => {
 
     u();
     expect(f).toBeCalledTimes(3);
+});
 
+test("simple update, with initial value", () => {
+    const { subscribe, set } = writable(0);
+    const a: IReadable<number> = {
+        subscribe(r, i?: any) {
+            return { unsubscribe: subscribe(r, i) };
+        }
+    };
+    const b = derived(a, 10, ($a, $b) => $b + $a);
+
+    expect(b.get()).toBe(10);
+
+    const f = jest.fn<void, [number, number]>();
+    const u = b.subscribe(f);
+    expect(f).toHaveBeenCalledTimes(1);
+    expect(f).toHaveBeenCalledWith(10, 10);
+
+    set(1);
+    expect(f).toHaveBeenCalledTimes(2);
+    expect(f).toHaveBeenCalledWith(11, 10);
+
+    set(10);
+    expect(f).toHaveBeenCalledTimes(3);
+    expect(f).toHaveBeenCalledWith(21, 11);
+
+    expect(b.get()).toBe(21);
+
+    u(); //unsubscribe
+
+    //changes ignored
+    set(1);
+    set(2);
+    set(3);
+
+    //only the last one matters
+    set(-20);
+    expect(f).toHaveBeenCalledTimes(3);
+    expect(b.get()).toBe(1);
+    set(0);
+
+    const c = derived([a, b], 100, ([$a, $b], $c) => $a + $b + $c);
+    expect(c.get()).toBe(101);
+
+    c.subscribe(f);
+    expect(c.get()).toBe(102);
+    expect(f).toHaveBeenCalledTimes(4);
+    expect(f).toHaveBeenCalledWith(102, 102);
+
+    set(1);
+    expect(b.get()).toBe(2);
+    expect(c.get()).toBe(105);
 });

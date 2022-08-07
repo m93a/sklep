@@ -29,15 +29,3 @@ export function shouldUpdate(
 			return !isPrimitive(newVal);
 	}
 }
-
-export function shouldSomeUpdate(
-    oldVals: unknown[],
-    newVals: unknown[],
-    skip: 'never' | 'primitive' | 'always'
-): boolean {
-    if (oldVals.length !== newVals.length) return true;
-    return oldVals.some((oldVal, i) => {
-        const newVal = newVals[i];
-        return shouldUpdate(oldVal, newVal, skip)
-    });
-}

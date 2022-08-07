@@ -1,4 +1,4 @@
-import { Readable } from "./core";
+import type { Readable } from "./core";
 
 export type ListObserverAtomicEntry<T> = {
     type: "set";

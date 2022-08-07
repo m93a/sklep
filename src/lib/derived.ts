@@ -1,30 +1,24 @@
 import {
 	writable,
+	get as getStoreValue,
 	type Invalidator,
 	type IReadable,
 	type Readable,
 	type Stopper,
 	type Subscriber,
-	type SubscriberInvalidatorPair,
-	type UnsubscriberStrong,
 	type UnsubscriberWeak,
 	type Updater,
 	type WritableOptions
 } from './core';
-import { shouldSomeUpdate } from './utils';
 
 type ReadableStores =
 	| IReadable<any>
 	| [IReadable<any>, ...Array<IReadable<any>>]
 	| Array<IReadable<any>>;
 
-type StoreValues<T> = T extends Readable<infer U>
+type StoreValues<T> = T extends IReadable<infer U>
 	? U
-	: { [K in keyof T]: T[K] extends Readable<infer U> ? U : never };
-
-type PartialStoreValues<T> = T extends Readable<infer U>
-	? U | undefined
-	: { [K in keyof T]: T[K] extends Readable<infer U> ? U | undefined : never };
+	: { [K in keyof T]: T[K] extends IReadable<infer U> ? U : never };
 
 export interface DerivedOptions<S extends ReadableStores, T> extends WritableOptions {
 	/** A store or a list of stores used to compute this derived store's value. */
@@ -63,12 +57,7 @@ export interface DerivedOptions<S extends ReadableStores, T> extends WritableOpt
 	 */
 	skipDirtyDeps?: boolean;
 
-	/**
-	 * Similar to `skipSubscribersWhenEqual`, but this time it skips
-	 * the call to the `update` function if the value of dependencies
-	 * is reference-equal to the old value. Default value: `'never'`
-	 */
-	skipUpdateWhenEqual?: 'never' | 'primitive' | 'always';
+	// TODO keepAlive
 }
 
 export type SimpleUpdateCallback<S, T, P> = (
@@ -117,6 +106,8 @@ export function derived<S extends ReadableStores, T>(
 	b?: T | SimpleUpdateCallback<S, T, T | undefined>,
 	c?: SimpleUpdateCallback<S, T, T>
 ): Readable<T> {
+	// parse options from the three possible overloads
+	// and collect them into one options object
 	let options: DerivedOptions<S, T>;
 	if ('deps' in a && 'update' in a && typeof a.update === 'function') {
 		options = a;
@@ -137,46 +128,78 @@ export function derived<S extends ReadableStores, T>(
 		};
 	}
 
-	const { update, initial, skipSubscribersWhenEqual } = options; // TODO keepAlive
-	const skipDirtyDeps = options.skipDirtyDeps ?? true;
-	const skipUpdateWhenEqual = options.skipUpdateWhenEqual ?? 'never';
-
+	// array of dependencies
 	const single = !Array.isArray(options.deps);
 	const deps: ReadonlyArray<
 		IReadable<any> & { subscribe(run: Subscriber<any>, invalidate?: Invalidator): UnsubscriberWeak }
 	> = Array.isArray(options.deps) ? options.deps : [options.deps];
-	const depValues: any[] = [];
-	let depPrevValues: any[] = deps.map((_) => undefined);
-	const depDirty = deps.map((_) => true);
-	const depUnsubscribers: UnsubscriberWeak[] = [];
 
-	const { listen, subscribe, get, isDirty, set, invalidate } = writable<T>(
+	// extract other important options
+	const { update, initial, skipSubscribersWhenEqual } = options;
+	const skipDirtyDeps = options.skipDirtyDeps ?? true;
+
+	// various bookkeeping and caching
+	let depValues: any[] = [];
+	let depPrevValues: any[] = deps.map((_) => undefined);
+	let depUnsubscribers: UnsubscriberWeak[] = [];
+	const depDirty = deps.map((_) => true);
+
+	let stopPreviousUpdate: Stopper | void;
+	let hasAnySubscribers = false;
+
+	// the internal writable store
+	// that manages subscribers to this store,
+	// remembers the last value, etc.
+	const {
+		listen,
+		subscribe,
+		get: getRawValue,
+		isDirty,
+		set,
+		invalidate
+	} = writable<T>(
+		// initial value might be undefined,
+		// but will most likely be immediately set
+		// to a value of type T by the `update` callback
 		initial!,
+
+		// initialization function, executed when the first
+		// subscriber subscribes. note that this also applies
+		// to the case when all previous subscribers have
+		// unsubscribed
 		() => {
 			let starting = true;
 			for (let i = 0; i < deps.length; i++) {
 				depDirty[i] = true;
 				depUnsubscribers[i] = deps[i].subscribe(
+					// an internal subscriber for the i-th dependency
 					(value) => {
+						// remember the current dep's value,
+						// initialize previous value to the current one
+						// (the rationale being that it hasn't changed recently)
+						// and mark this dep as not dirty
 						depValues[i] = value;
 						if (starting) depPrevValues[i] = value;
 						depDirty[i] = false;
 
+						// skip updating this store's value if some deps are still dirty
 						if (skipDirtyDeps && depDirty.some((d) => d)) return;
-						if (!isDirty() && !shouldSomeUpdate(depPrevValues, depValues, skipUpdateWhenEqual))
-							return;
 
-						debugger;
-
-						update(
+						// call the previous update's stopper, if there's any
+						// and call the update, remembering its current stopper
+						stopPreviousUpdate?.();
+						stopPreviousUpdate = update(
 							single ? depValues[0] : depValues,
 							set,
-							get(),
+							getRawValue(),
 							single ? depPrevValues[0] : depPrevValues
 						);
 
 						depPrevValues = [...depValues];
 					},
+
+					// if a dependency invalidates, remember it's invalid
+					// also invalidate self
 					() => {
 						depDirty[i] = true;
 						invalidate();
@@ -184,18 +207,50 @@ export function derived<S extends ReadableStores, T>(
 				);
 			}
 
+			// the store is now fully initialized
+			hasAnySubscribers = true;
 			starting = false;
 
+			// the stopper for this store,
+			// called when all its subscribers unsubscribe
 			return () => {
+				// unsubscribe all internal subscribers
+				// of this store's dependencies
 				for (let i = 0; i < deps.length; i++) {
 					const unsub = depUnsubscribers[i];
 					if (typeof unsub === 'function') unsub();
 					else unsub.unsubscribe();
 				}
+
+				// call and forget the update's stopper
+				stopPreviousUpdate?.();
+				stopPreviousUpdate = undefined;
+				hasAnySubscribers = false;
+
+				// wipe everything to prevent memory leaks
+				depValues = [];
+				depPrevValues = [];
+				depUnsubscribers = [];
 			};
 		},
 		{ skipSubscribersWhenEqual }
 	);
+
+	function get(): T {
+		// if there are no subscribers, the values are probably outdated
+		// fetch new dep values and compute new derived value
+		if (!hasAnySubscribers) {
+			depValues = deps.map(getStoreValue);
+			update(
+				single ? depValues[0] : depValues,
+				set,
+				getRawValue(),
+				single ? depValues[0] : depValues
+			)?.();
+		}
+
+		return getRawValue();
+	}
 
 	return { listen, subscribe, get, isDirty };
 }
