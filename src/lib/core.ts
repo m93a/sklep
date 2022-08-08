@@ -1,25 +1,17 @@
+import type { Pipe } from './pipe';
 import { shouldUpdate } from './utils';
 
-export type Setter<T> = (value: T) => void;
-export type Subscriber<T> = (value: T, previousValue: T) => void;
-export type UnsubscriberWeak = (() => void) | { unsubscribe(): void };
-export type UnsubscriberStrong = { (): boolean; unsubscribe(): boolean };
-export type Updater<T> = (value: T) => T;
-export type Invalidator = () => void;
-export type Stopper = () => void;
-export type StartStopNotifier<T> = (set: Setter<T>, invalidate: Invalidator) => Stopper | void;
+// Interfaces for interop with external stores
 
-export interface SubscriberInvalidatorPair<T> {
-	run: Subscriber<T>;
-	invalidate?: Invalidator;
-}
+export type SubscriberWeak<T> = (value: T) => void;
+export type UnsubscriberWeak = (() => void) | { unsubscribe(): void };
 
 /**
  * A minimal implementation of the Store Contract.
  * @see https://svelte.dev/docs#component-format-script-4-prefix-stores-with-$-to-access-their-values-store-contract
  */
 export interface IReadable<T> {
-	subscribe(this: void, run: Subscriber<T>): UnsubscriberWeak;
+	subscribe(this: IReadable<T>, run: SubscriberWeak<T>): UnsubscriberWeak;
 }
 
 /**
@@ -27,7 +19,35 @@ export interface IReadable<T> {
  * @see https://svelte.dev/docs#component-format-script-4-prefix-stores-with-$-to-access-their-values-store-contract
  */
 export interface IWritable<T> extends IReadable<T> {
-	set(this: void, value: T): void;
+	set(this: IWritable<T>, value: T): void;
+}
+
+export function isIReadable(x: unknown): x is IReadable<unknown> {
+	const store = x as Partial<IReadable<unknown>> | null;
+	return (
+		(typeof store === 'object' || typeof store === 'function') &&
+		typeof store?.subscribe === 'function'
+	);
+}
+
+export function isIWritable(x: unknown): x is IWritable<unknown> {
+	const store = x as Partial<IWritable<unknown>> | null;
+	return typeof store?.set === 'function' && isIReadable(store);
+}
+
+// Implementation of our stores
+
+export type Setter<T> = (value: T) => void;
+export type Subscriber<T> = (value: T, previousValue: T) => void;
+export type Unsubscriber = { (): boolean; unsubscribe(): boolean };
+export type Updater<T> = (value: T) => T;
+export type Invalidator = () => void;
+export type Stopper = () => void;
+export type StartStopNotifier<T> = (set: Setter<T>, invalidate: Invalidator) => Stopper | void;
+
+interface SubscriberInvalidatorPair<T> {
+	run: Subscriber<T>;
+	invalidate?: Invalidator;
 }
 
 export interface Readable<T> extends IReadable<T> {
@@ -49,7 +69,7 @@ export interface Readable<T> extends IReadable<T> {
 	 * @returns a function that cancels this subscribtion; also contains an `unsubscribe` parameter
 	 * for cross-compatibility with RxJS
 	 */
-	subscribe(this: void, run: Subscriber<T>, invalidate?: Invalidator): UnsubscriberStrong;
+	subscribe(this: void, run: Subscriber<T>, invalidate?: Invalidator): Unsubscriber;
 
 	/**
 	 * Recieve a call every time the store changes its value. Exactly like `subscribe`
@@ -62,7 +82,7 @@ export interface Readable<T> extends IReadable<T> {
 	 * @returns a function that cancels this subscribtion; also contains an `unsubscribe` parameter
 	 * for cross-compatibility with RxJS
 	 */
-	listen(this: void, run: Subscriber<T>, invalidate?: Invalidator): UnsubscriberStrong;
+	listen(this: void, run: Subscriber<T>, invalidate?: Invalidator): Unsubscriber;
 
 	/**
 	 * Get the current value of this store but do not subscribe to changes.
@@ -74,6 +94,14 @@ export interface Readable<T> extends IReadable<T> {
 	 * but before changing its value and notifying any of its subscribers.
 	 */
 	isDirty(this: void): boolean;
+
+	/**
+	 * Given several functions, it executes the first one with this store as an argument,
+	 * then takes the returned value and gives it to the second function, etc.
+	 * until finally returning the result of the last function.
+	 * Can be used to apply RxJS operators to the store.
+	 */
+	pipe: Pipe<Readable<T>>;
 }
 
 export interface Writable<T> extends Readable<T>, Omit<IWritable<T>, 'subscribe'> {
@@ -93,6 +121,36 @@ export interface Writable<T> extends Readable<T>, Omit<IWritable<T>, 'subscribe'
 	 * @returns the new value
 	 */
 	update(this: void, updater: Updater<T>): T;
+
+	/**
+	 * Given several functions, it executes the first one with this store as an argument,
+	 * then takes the returned value and gives it to the second function, etc.
+	 * until finally returning the result of the last function.
+	 * Can be used to apply RxJS operators to the store.
+	 */
+	pipe: Pipe<Writable<T>>;
+}
+
+export function isReadable(x: unknown): x is Readable<unknown> {
+	const store = x as Partial<Writable<unknown>> | null;
+	return (
+		(typeof store === 'object' || typeof store === 'function') &&
+		typeof store?.subscribe === 'function' &&
+		typeof store?.listen === 'function' &&
+		typeof store?.get === 'function' &&
+		typeof store?.isDirty === 'function' &&
+		typeof store?.pipe === 'function'
+	);
+}
+
+export function isWritable(x: unknown): x is Writable<unknown> {
+	const store = x as Partial<Writable<unknown>> | null;
+	return (
+		typeof store?.invalidate === 'function' &&
+		typeof store?.set === 'function' &&
+		typeof store?.update === 'function' &&
+		isReadable(store)
+	);
 }
 
 export interface WritableOptions {
@@ -139,7 +197,7 @@ export function writable<T>(
 
 	const skipSubscribersWhenEqual = options?.skipSubscribersWhenEqual ?? 'primitive';
 
-	function listen(run: Subscriber<T>, inv?: Invalidator): UnsubscriberStrong {
+	function listen(run: Subscriber<T>, inv?: Invalidator): Unsubscriber {
 		// first subscriber?
 		if (subscribers.length === 0) {
 			stop = start?.(set, invalidate);
@@ -162,7 +220,7 @@ export function writable<T>(
 		return Object.assign(unsubscribe, { unsubscribe });
 	}
 
-	function subscribe(run: Subscriber<T>, invalidate?: Invalidator): UnsubscriberStrong {
+	function subscribe(run: Subscriber<T>, invalidate?: Invalidator): Unsubscriber {
 		// first run the start function – if it were to set the value,
 		// we don't want to run any subscriber before that
 		const u = listen(run, invalidate);
@@ -206,7 +264,12 @@ export function writable<T>(
 		return dirty;
 	}
 
-	return { listen, subscribe, get, invalidate, set, update, isDirty };
+	function pipe(...fns: Array<(item: any) => any>) {
+		return fns.reduce((previousValue, f) => f(previousValue), result);
+	}
+
+	const result: Writable<T> = { listen, subscribe, get, invalidate, set, update, isDirty, pipe };
+	return result;
 }
 
 export function readable<T>(
@@ -222,16 +285,10 @@ export function readable<T>(
 	start?: StartStopNotifier<T>,
 	options?: WritableOptions
 ): Readable<T> {
-	const isStore =
-		(typeof value === 'object' || typeof value === 'function') &&
-		'subscribe' in value &&
-		typeof value.subscribe === 'function' &&
-		typeof value.listen === 'function' &&
-		typeof value.get === 'function' &&
-		typeof value.isDirty === 'function';
-
-	const { listen, subscribe, get, isDirty } = isStore ? value : writable(<T>value, start, options);
-	return { listen, subscribe, get, isDirty };
+	const { listen, subscribe, get, isDirty, pipe } = isWritable(value)
+		? value
+		: writable(<T>value, start, options);
+	return { listen, subscribe, get, isDirty, pipe };
 }
 
 /**
@@ -256,9 +313,9 @@ export function get<T>(store: IReadable<T>): T {
 
 	if (!called)
 		throw new TypeError(
-			"Subscribed function not called synchronously at subscription time. " +
-			"If you're trying to get the value of an RxJS observable, you have " +
-			"to wrap it using `const r = readable(o)` and then get the value of `r`."
+			'Subscribed function not called synchronously at subscription time. ' +
+				"If you're trying to get the value of an RxJS observable, you have " +
+				'to wrap it using `const r = readable(o)` and then get the value of `r`.'
 		);
 
 	return value!;

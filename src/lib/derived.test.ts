@@ -40,43 +40,44 @@ test("single store, simple update, without initial value", () => {
     expect(h).toBeCalledTimes(2);
     expect(h).toHaveBeenLastCalledWith(2, 3, 6);
 
-    u();
+    u(); // forgets the current value
     expect(h).toBeCalledTimes(2);
 
     c.subscribe(f);
     expect(h).toBeCalledTimes(3);
-    expect(h).toHaveBeenLastCalledWith(2, 1, 2);
+    expect(h).toHaveBeenLastCalledWith(2, undefined, 2);
 });
 
 test("multiple stores, simple update, without initial value", () => {
-    const f = jest.fn(([v, w]: number[], p: number | undefined, d: number[]) => v + w);
-    const g = jest.fn<void, [number, number]>();
-    const h = jest.fn<void, []>();
+    const update = jest.fn(([v, w]: number[], p: number | undefined, d: number[]) => v + w);
+    const sub = jest.fn<void, [number, number]>();
+    const inv = jest.fn<void, []>();
 
     const a = writable(1);
     const b = writable(2);
-    const c = derived([a, b], f);
+    const c = derived([a, b], update);
 
-    expect(f).not.toBeCalled();
-    expect(g).not.toBeCalled();
-    expect(h).not.toBeCalled();
+    expect(update).not.toBeCalled();
+    expect(sub).not.toBeCalled();
+    expect(inv).not.toBeCalled();
 
     expect(c.get()).toBe(3);
-    expect(f).toBeCalledTimes(1);
-    expect(f).toHaveBeenCalledWith([1, 2], undefined, [1, 2]);
+    expect(update).toBeCalledTimes(1);
+    expect(update).toHaveBeenLastCalledWith([1, 2], undefined, [1, 2]);
+    // has no subs → won't remember last value
 
-    const u = c.subscribe(g, h);
-    expect(f).toBeCalledTimes(2);
-    expect(f).toHaveBeenCalledWith([1, 2], 3, [1, 2]);
-    expect(g).toBeCalledTimes(1);
-    expect(g).toHaveBeenCalledWith(3, 3);
+    const u = c.subscribe(sub, inv);
+    expect(update).toBeCalledTimes(2);
+    expect(update).toHaveBeenLastCalledWith([1, 2], undefined, [1, 2]);
+    expect(sub).toBeCalledTimes(1);
+    expect(sub).toHaveBeenCalledWith(3, 3);
 
     a.set(4);
-    expect(f).toBeCalledTimes(3);
-    expect(f).toHaveBeenLastCalledWith([4, 2], 3, [1 ,2]);
+    expect(update).toBeCalledTimes(3);
+    expect(update).toHaveBeenLastCalledWith([4, 2], 3, [1 ,2]);
 
     u();
-    expect(f).toBeCalledTimes(3);
+    expect(update).toBeCalledTimes(3);
 });
 
 test("simple update, with initial value", () => {
@@ -93,19 +94,20 @@ test("simple update, with initial value", () => {
     const f = jest.fn<void, [number, number]>();
     const u = b.subscribe(f);
     expect(f).toHaveBeenCalledTimes(1);
-    expect(f).toHaveBeenCalledWith(10, 10);
+    expect(f).toHaveBeenCalledWith(10, 10); // 0 + 10
 
     set(1);
     expect(f).toHaveBeenCalledTimes(2);
-    expect(f).toHaveBeenCalledWith(11, 10);
+    expect(f).toHaveBeenCalledWith(11, 10); // 1 + 10
 
     set(10);
     expect(f).toHaveBeenCalledTimes(3);
-    expect(f).toHaveBeenCalledWith(21, 11);
+    expect(f).toHaveBeenCalledWith(21, 11); // 10 + 11
 
     expect(b.get()).toBe(21);
 
     u(); //unsubscribe
+    //the value of the derived store should reset now
 
     //changes ignored
     set(1);
@@ -115,18 +117,19 @@ test("simple update, with initial value", () => {
     //only the last one matters
     set(-20);
     expect(f).toHaveBeenCalledTimes(3);
-    expect(b.get()).toBe(1);
-    set(0);
+    expect(b.get()).toBe(-10); // a + initial = -20 + 10 = -10
+    // immediately reset last value to initial (10)
 
+    set(5);
     const c = derived([a, b], 100, ([$a, $b], $c) => $a + $b + $c);
-    expect(c.get()).toBe(101);
+    expect(c.get()).toBe(120); // 5 + (10+5) + 100
 
     c.subscribe(f);
-    expect(c.get()).toBe(102);
+    expect(c.get()).toBe(120);
     expect(f).toHaveBeenCalledTimes(4);
-    expect(f).toHaveBeenCalledWith(102, 102);
+    expect(f).toHaveBeenCalledWith(120, 120);
 
-    set(1);
-    expect(b.get()).toBe(2);
-    expect(c.get()).toBe(105);
+    set(10);
+    expect(b.get()).toBe(25); // 10 + 15
+    expect(c.get()).toBe(155); // 10 + 25 + 120
 });

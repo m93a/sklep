@@ -5,10 +5,10 @@ import {
 	type IReadable,
 	type Readable,
 	type Stopper,
-	type Subscriber,
 	type UnsubscriberWeak,
 	type Updater,
-	type WritableOptions
+	type WritableOptions,
+	type SubscriberWeak
 } from './core';
 
 type ReadableStores =
@@ -131,7 +131,7 @@ export function derived<S extends ReadableStores, T>(
 	// array of dependencies
 	const single = !Array.isArray(options.deps);
 	const deps: ReadonlyArray<
-		IReadable<any> & { subscribe(run: Subscriber<any>, invalidate?: Invalidator): UnsubscriberWeak }
+		IReadable<any> & { subscribe(run: SubscriberWeak<any>, invalidate?: Invalidator): UnsubscriberWeak }
 	> = Array.isArray(options.deps) ? options.deps : [options.deps];
 
 	// extract other important options
@@ -156,7 +156,7 @@ export function derived<S extends ReadableStores, T>(
 		get: getRawValue,
 		isDirty,
 		set,
-		invalidate
+		invalidate,
 	} = writable<T>(
 		// initial value might be undefined,
 		// but will most likely be immediately set
@@ -231,6 +231,11 @@ export function derived<S extends ReadableStores, T>(
 				depValues = [];
 				depPrevValues = [];
 				depUnsubscribers = [];
+
+				// reset the value to the initial value
+				// don't mind the undefined, as it will only ever
+				// be passed as previousValue, never as value
+				set(initial!);
 			};
 		},
 		{ skipSubscribersWhenEqual }
@@ -239,18 +244,26 @@ export function derived<S extends ReadableStores, T>(
 	function get(): T {
 		// if there are no subscribers, the values are probably outdated
 		// fetch new dep values and compute new derived value
+		let value!: T;
 		if (!hasAnySubscribers) {
 			depValues = deps.map(getStoreValue);
 			update(
 				single ? depValues[0] : depValues,
-				set,
+				v => (value = v),
 				getRawValue(),
 				single ? depValues[0] : depValues
 			)?.();
+		} else {
+			value = getRawValue();
 		}
 
-		return getRawValue();
+		return value;
 	}
 
-	return { listen, subscribe, get, isDirty };
+	function pipe(...fns: Array<(item: any) => any>) {
+		return fns.reduce((previousValue, f) => f(previousValue), result);
+	}
+
+	const result: Readable<T> = { listen, subscribe, get, isDirty, pipe };
+	return result
 }
