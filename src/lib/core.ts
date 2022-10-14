@@ -272,13 +272,13 @@ export function writable<T>(
 	return result;
 }
 
+export function readable<T>(writable: Writable<T>): Readable<T>;
+
 export function readable<T>(
 	value: T,
 	start?: StartStopNotifier<T>,
 	options?: WritableOptions
 ): Readable<T>;
-
-export function readable<T>(writable: Writable<T>): Readable<T>;
 
 export function readable<T>(
 	value: T | Writable<T>,
